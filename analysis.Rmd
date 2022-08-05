@@ -1,0 +1,1077 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(fitdistrplus)
+library(readxl, plyr)
+library(dplyr)
+library(gridExtra)
+library(grid)
+library(ggplot2)
+library(lattice)
+library(rstan)
+library(ggplot2)
+library(Rlab)
+library(distr)
+library(pracma)
+library(sfsmisc)
+library(magrittr)
+library(ggpubr)
+library(Hmisc)
+library(tidyr)
+library(stringr)
+library(npreg)
+source("r_functions.R")
+```
+
+```{r}
+load("fit_pfu.Rdata")
+load("fit.Rdata") 
+posterior_pfu <- rstan::extract(fit_pfu)
+posterior_copy <- rstan::extract(fit)
+```
+
+```{r}
+df_merged <- readRDS(file="Data/trajectories.rds") 
+df_merged <- df_merged %>%
+  mutate(group = case_when(
+    (vaccinated == FALSE) ~ 1,
+    (vaccinated == TRUE) ~ 2
+  )) 
+
+df_merged$obs_id <- as.integer(factor(df_merged$id_sub, levels=unique(df_merged$id_sub)))
+```
+
+```{r}
+# Copy number data
+x <- log(df_merged$copy)
+t <- df_merged$day[!is.na(x)]
+obs_id <- df_merged$obs_id[!is.na(x)]
+x <- x[!is.na(x)]
+N <- length(unique(obs_id))
+group_index <- df_merged[!is.na(x),] %>%
+  group_by(obs_id) %>%
+  summarise(group_index= unique(group))
+group_index <- group_index$group_index
+NG <- length(unique(group_index))
+M <- length(x)
+```
+
+```{r}
+exclude_pfu <- c(12, 18, 23, 25, 30, 33, 36, 41, 47, 56)
+
+# Participants to  in sensitivity analysis 
+include_pfu_sens <- c(2, 6, 7, 8, 11, 12, 13, 16, 17, 18, 21, 22, 23, 25, 26,
+                      27, 30, 33, 39, 40, 41, 42, 44, 46, 47, 49, 51, 56)
+
+df_pfu <- df_merged[df_merged$pfu_exist, ]
+df_pfu$obs_id_old <-
+  as.integer(factor(df_pfu$id_sub, levels = unique(df_pfu$id_sub)))
+df_pfu_id <- df_pfu[!df_pfu$obs_id_old%in%exclude_pfu, ]
+df_pfu_id$obs_id <- as.integer(factor(df_pfu_id$id_sub, levels = unique(df_pfu_id$id_sub)))
+```
+
+```{r}
+# Figure order
+order_ids <- as.data.frame(read_excel("Data/part_order.xlsx"))
+
+order_ids <- order_ids %>%
+  separate(
+    id_sub,
+    into = c("Study", "id_num"),
+    sep = "(?<=[A-Za-z])(?=[0-9])",
+    remove = TRUE
+  ) %>%
+  mutate(id_sub = str_pad(id_num, 4, pad = "0")) %>%
+  mutate(id_sub = paste0(Study, str_pad(id_num,4,pad="0")))
+
+observed_ids <- data.frame("obs_id" = unique(df_merged$obs_id))
+observed_ids$ID <- unique(df_merged$id_sub)
+
+observed_ids <- observed_ids %>%
+  separate(
+    ID,
+    into = c("Study", "id_num"),
+    sep = "(?<=[A-Za-z])(?=[0-9])",
+    remove = FALSE
+  ) %>%
+  mutate(id_sub = str_pad(id_num, 4, pad = "0")) %>%
+  mutate(id_sub = paste0(Study, str_pad(id_num,4,pad="0")))
+
+merged_ids <- merge(x=order_ids, y=observed_ids, by = "id_sub")
+merged_ids <- merged_ids[order(merged_ids$order),]
+merged_ids_new <- merged_ids
+
+# Rearrange plot order for ggarrange
+merged_ids_new[56:57, ] <- merged_ids[53:54,]
+merged_ids_new[53:54, ] <- merged_ids[55:56,]
+merged_ids_new[55, ] <- merged_ids[57,]
+
+merged_ids$order[merged_ids$obs_id%in%exclude_pfu]
+```
+
+```{r}
+group_1 <- unique(df_merged[df_merged$group==1, "obs_id"])
+group_2 <- unique(df_merged[df_merged$group==2, "obs_id"])
+
+group_1_pfu <- group_1[!group_1%in%c(exclude_pfu)]
+group_2_pfu <- group_2[!group_2%in%c(exclude_pfu)]
+```
+
+```{r}
+# PFU and PCR data and posterior trajectories
+tr <- seq(1, 42)-1-14
+t_len <- length(tr)
+
+pred_vl_samples <- as.data.frame(posterior_copy$pred_vl)
+pred_pfu_samples <- as.data.frame(posterior_pfu$pred_vl)
+
+s_len <- length(pred_vl_samples[, 1])
+group_id <- df_merged$group
+
+group_color <-
+  c(
+    "1" = "red3",
+    "2" = "springgreen3",
+    "3" = "turquoise4",
+    "4" = "orchid4"
+  )
+
+vacc_color <- 
+  c(
+    "1" = "springgreen3",
+    "2" = "orchid4"
+  )
+
+label_id_fun <- function(ii) {
+  label_id2 <- merged_ids_new$order
+  if (label_id2[ii] %in% label_asterix) {
+    r <- paste0(label_id2[ii], "*")
+  } else if (label_id2[ii] %in% label_dagger) {
+    r <- paste0(label_id2[ii], "†")
+  }
+  else {
+    r <- label_id2[ii]
+  }
+  return(r)
+}
+
+label_asterix <- merged_ids$order[merged_ids$obs_id%in%exclude_pfu]
+label_dagger <- merged_ids$order[!merged_ids$obs_id%in%include_pfu_sens]
+
+ids <- merged_ids_new$obs_id
+med_peak <- double(0)
+for (ii in 1:N){
+  med_peak <- append(med_peak, median(posterior_copy_i(ids[ii])$p_t_max))
+}
+
+gs <- lapply((1:N), function(ii)
+  ggplot() +
+    geom_point(
+      data = extract_exclude_data_pfu(ids[ii]),
+      aes(x = t-med_peak[ii],
+          y = vl / log(10)),
+      size = 1.2,
+      shape = 17
+    ) +
+    geom_line(
+      data = extract_exclude_pfu2(ids[ii]),
+      aes(
+        x = t-med_peak[ii],
+        y = vl / log(10),
+        color = factor(group_index[ids[ii]])
+      ),
+      size = 0.7,
+      linetype = "dashed"
+    ) +
+    geom_ribbon(
+      data = extract_exclude_pfu2(ids[ii]),
+      aes(
+        x = t-med_peak[ii],
+        ymin = CI_l / log(10),
+        ymax = CI_u / log(10)
+      ),
+      fill = "gray",
+      alpha = 0.5
+    ) +
+    geom_point(data = extract_data(ids[ii]),
+               aes(x = t-med_peak[ii],
+                   y = vl / log(10)), size = 1.5) +
+    geom_line(
+      data = extract_pred(ids[ii]),
+      aes(
+        x = t-med_peak[ii],
+        y = vl / log(10),
+        color = factor(group_index[ids[ii]])
+      ),
+      size = 0.7
+    ) +
+    geom_ribbon(
+      data = extract_pred(ids[ii]),
+      aes(
+        x = t-med_peak[ii],
+        ymin = CI_l / log(10),
+        ymax = CI_u / log(10)
+      ),
+      fill = "gray",
+      alpha = 0.5
+    ) +
+    theme_bw() +
+    theme(legend.text = element_text(size = 11)) +
+    theme(
+      axis.title.x = x_label(ii, 5),
+      axis.text.y = y_label(ii, 5),
+      axis.text.x = x_label(ii, 5),
+      axis.title.y = y_label(ii, 5),
+      plot.margin = unit(c(5.5, 5.5, -2, 5.5), "pt"),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) +
+    scale_color_manual(
+      values = vacc_color,
+      labels = c(
+        "Unvaccinated",
+        "Fully vaccinated"
+      ),
+      name = NULL
+    ) +
+    ylab("log10") +
+    xlab("Day rel. to peak") +
+    ylim(0, 11) +
+    xlim(-10, 20) +
+    annotate(
+      geom = "text",
+      x = -10,
+      y = 10,
+      hjust = 0,
+      label = label_id_fun(ii),
+      color = "black"
+    ))
+
+gs[58:60] <- gs[53:55]
+gs[53:55] <- NA
+
+g_plot_copy_pfu <- ggarrange(
+  plotlist = gs,
+  ncol = 5,
+  nrow = 12,
+  common.legend = TRUE,
+  legend = "bottom",
+  widths = c(1, rep(1-1/5, 4)),
+  heights = c(rep(1-1/4, 11), 1),
+  font.label=list(color="black",size=12)
+)
+print(g_plot_copy_pfu)
+ggsave("model_fit.png", width = 15, height = 25, units = "cm", dpi = 600, g_plot_copy_pfu)
+
+```
+
+```{r}
+# PFU within-sample mean results, vaccinated vs unvaccinated
+res <-
+  print_results(
+    c(group_1_pfu, group_2_pfu),
+    "All contacts",
+    2.3,
+    posterior_pfu_i
+  )
+
+res <- rbind(res,
+             print_results(
+               c(group_1_pfu),
+               "Unvaccinated",
+               2.3,
+               posterior_pfu_i
+             ))
+res <- rbind(res,
+             print_results(group_2_pfu, "Vaccinated", 2.3, posterior_pfu_i))
+```
+
+
+```{r}
+# PFU AUC results
+res <-
+  print_auc_pfu(c(group_1_pfu, group_2_pfu),
+                "All contacts")
+res <-
+  rbind(res, print_auc_pfu(c(group_1_pfu), "All unvaccinated"))
+res <- rbind(res, print_auc_pfu(c(group_2_pfu), "Vaccinated"))
+
+```
+
+```{r}
+# Copy number within-sample, vaccinated vs unvaccinated
+res <-
+  print_results(
+    c(group_1, group_2),
+    "All contacts",
+    3.4,
+    posterior_copy_i
+  )
+res <- rbind(res,
+             print_results(
+               c(group_1),
+               "Unvaccinated",
+               3.4,
+               posterior_copy_i
+             ))
+res <- rbind(res,
+             print_results(c(group_2), "Vaccinated", 3.4, posterior_copy_i))
+
+res <-
+  print_auc_copy(c(group_1, group_2),
+                "All contacts")
+res <-
+  rbind(res, print_auc_copy(c(group_1), "All unvaccinated"))
+res <- rbind(res, print_auc_copy(c(group_2), "Vaccinated"))
+```
+
+```{r}
+# Calculate Bayes factors
+# PCR vs PFU rates
+res <-
+  compare_copy_pfu_rates(
+    c(group_1, group_2),
+    c(group_1_pfu, group_2_pfu),
+    30
+  )
+
+# PFU kinetics, vaccinated vs unvaccinated
+res <- compare_rates(group_1_pfu, group_2_pfu, posterior_pfu_i, 15)
+
+# PCR kinetics, vaccinated vs unvaccinated
+res <- compare_rates(group_1, group_2, posterior_copy_i, 20)
+
+# PFU peaks, vaccinated vs unvaccinated
+res <- compare_peaks(c(group_1_pfu), group_2_pfu, posterior_pfu_i, 15)
+
+# PCR peaks vaccinated vs unvaccinated
+res <- compare_peaks(c(group_1), group_2, posterior_copy_i, 15)
+
+# PFU AUC, vaccinated vs unvaccinated
+res <-
+  compare_auc_pfu(group_2_pfu, c(group_1_pfu), 40)
+
+# PCR AUC vaccinated vs unvaccinated
+res <-
+  compare_auc_copy(group_2, c(group_1), 600)
+```
+
+
+```{r}
+# PCR trajectory correlations
+
+res <- calc_corr(2,1, posterior_copy, TRUE)
+res <- rbind(res, calc_corr(3,1, posterior_copy, TRUE))
+res <- rbind(res, calc_corr(3,2, posterior_copy, FALSE))
+
+res[,2:5] <- round(res[,2:5], digits = 2)
+```
+
+```{r}
+# PFU trajectory correlations
+
+res <- calc_corr(2,1, posterior_pfu, TRUE)
+res <- rbind(res, calc_corr(3,1, posterior_pfu, TRUE))
+res <- rbind(res, calc_corr(3,2, posterior_pfu, FALSE))
+
+res[,2:5] <- round(res[,2:5], digits = 2)
+```
+
+```{r}
+# PCR group-level parameters table
+
+res <- data.frame("mu11" = posterior_copy$vgrow[,1,1]+3.4)/log(10)
+res$mu12 <- (posterior_copy$vgrow[,1,2]+3.4)/log(10)
+res$mu21 <- posterior_copy$vgrow[,2,1]
+res$mu22 <- posterior_copy$vgrow[,2,2]
+res$mu31 <- posterior_copy$vgrow[,3,1]
+res$mu32 <- posterior_copy$vgrow[,3,2]
+res$delta1 <- posterior_copy$v_sd[,1]
+res$delta2 <- posterior_copy$v_sd[,2]
+res$delta3 <- posterior_copy$v_sd[,3]
+res$c12 <- posterior_copy$Lc[, 2, 1]
+res$c13 <- posterior_copy$Lc[, 3, 1]
+res$c23 <- posterior_copy$Lc[, 3, 2]
+res$sigma_v <- posterior_copy$v_s
+res$fp <- posterior_copy$fp
+res$x0 <- posterior_copy$fp_ct_mean
+res$sigma0 <- posterior_copy$fp_ct_sd
+
+res_cols <- colnames(res)
+
+stan_names <- c(
+  "vgrow[1,1]",
+  "vgrow[1,2]",
+  "vgrow[2,1]",
+  "vgrow[2,2]",
+  "vgrow[3,1]",
+  "vgrow[3,2]",
+  "v_sd[1]",
+  "v_sd[2]",
+  "v_sd[3]",
+  "Lc[2,1]",
+  "Lc[3,1]",
+  "Lc[3,2]",
+  "v_s",
+  "fp",
+  "fp_ct_mean",
+  "fp_ct_sd"
+)
+convert_names <- data.frame("table_names" = res_cols, "stan_names"=stan_names)
+
+res_tab <-
+  data.frame(
+    "parameter" = character(),
+    "median" = character(),
+    "rhat" = character(),
+    "n_eff" = character()
+  )
+
+for (i in 1:ncol(res)) {
+  param <- res_cols[i]
+  fit_param <- convert_names$stan_names[convert_names$table_names==param]
+  v <- param_quantiles(res[[param]])
+  res_tab <-
+    rbind(
+      res_tab,
+      data.frame("parameter" = param, "median" = format_quantiles_2(v),
+      "rhat" = sprintf("%.2f", summary(fit)$summary[fit_param, "Rhat"]),
+      "n_eff" = sprintf("%.0f", summary(fit)$summary[fit_param, "n_eff"])
+      )
+    )
+}
+```
+
+```{r}
+# PFU group-level results table, PFU
+
+res <- data.frame("mu11" = posterior_pfu$vgrow[,1,1]+2.3)/log(10)
+res$mu12 <- (posterior_pfu$vgrow[,1,2]+2.3)/log(10)
+res$mu21 <- posterior_pfu$vgrow[,2,1]
+res$mu22 <- posterior_pfu$vgrow[,2,2]
+res$mu31 <- posterior_pfu$vgrow[,3,1]
+res$mu32 <- posterior_pfu$vgrow[,3,2]
+res$delta1 <- posterior_pfu$v_sd[,1]
+res$delta2 <- posterior_pfu$v_sd[,2]
+res$delta3 <- posterior_pfu$v_sd[,3]
+res$c12 <- posterior_pfu$Lc[, 2, 1]
+res$c13 <- posterior_pfu$Lc[, 3, 1]
+res$c23 <- posterior_pfu$Lc[, 3, 2]
+res$sigma_v <- posterior_pfu$v_s
+res$fp <- posterior_pfu$fp
+res$x0 <- posterior_pfu$fp_ct_mean
+res$sigma0 <- posterior_pfu$fp_ct_sd
+
+res_tab <- data.frame("parameter"=character(), "median"=character())
+res_cols <- colnames(res)
+
+res_tab <-
+  data.frame(
+    "parameter" = character(),
+    "median" = character(),
+    "rhat" = character(),
+    "n_eff" = character()
+  )
+
+for (i in 1:ncol(res)) {
+  param <- res_cols[i]
+  fit_param <- convert_names$stan_names[convert_names$table_names==param]
+  v <- param_quantiles(res[[param]])
+  res_tab <-
+    rbind(
+      res_tab,
+      data.frame("parameter" = param, "median" = format_quantiles_2(v),
+      "rhat" = sprintf("%.2f", summary(fit_pfu)$summary[fit_param, "Rhat"]),
+      "n_eff" = sprintf("%.0f", summary(fit_pfu)$summary[fit_param, "n_eff"])
+      )
+    )
+}
+
+```
+
+```{r}
+# AUC pfu plot
+gplot <- ggplot()
+gplot <- plot_auc_pfu(gplot, c(group_1_pfu), group_color[2]) 
+gplot <- gplot +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("AUC") +
+    ylim(0, 1.3) +
+    xlim(0, 30) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+ggsave("Plots/auc_pfu_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# AUC pfu plot
+gplot <- ggplot()
+gplot <- plot_auc_pfu(gplot, c(group_2_pfu), group_color[4]) 
+gplot <- gplot +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("AUC") +
+    ylim(0, 1.3) +
+    xlim(0, 30) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+      )
+
+print(gplot)
+ggsave("Plots/auc_pfu_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# AUC copy Plot
+gplot <- ggplot()
+gplot <- plot_auc_copy(gplot, c(group_1), group_color[2]) 
+gplot <- gplot +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("AUC") +
+    ylim(0, 0.3) +
+    xlim(0, 200) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+ggsave("Plots/auc_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+
+```{r}
+# AUC copy Plot
+gplot <- ggplot()
+gplot <- plot_auc_copy(gplot, group_2, group_color[4]) 
+gplot <- gplot +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("AUC") +
+    ylim(0, 0.8) +
+    xlim(0, 200) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+ggsave("Plots/auc_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+
+```{r}
+# Growth rate
+gplot <- ggplot()
+gplot <-
+  group_plot_comp(gplot,
+             c(group_1, group_2, group_3),
+             3.4,
+             posterior_copy_i,
+             "v_b",
+             group_color[2])
+gplot <-
+  group_plot_comp(gplot,
+             c(group_1_pfu, group_2_pfu, group_3_pfu),
+             2.3,
+             posterior_pfu_i,
+             "v_b",
+             group_color[4]) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Decline rate (e-foldings / day)") +
+  ylim(0, 0.8) +
+  xlim(0, 25) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+
+print(gplot)
+
+```
+
+```{r}
+# Growth rate, copy uvacc
+gplot <- ggplot()
+gplot <-
+  group_plot(gplot,
+             c(group_1),
+             3.4,
+             posterior_copy_i,
+             "v_b",
+             group_color[2]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Growth rate (e-foldings / day)") +
+    ylim(0, 7.5) +
+    xlim(0, 10) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) 
+
+print(gplot)
+
+ggsave("Plots/growth_rate_copy_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Growth rate, copy, vaccinated
+gplot <- ggplot()
+gplot <- group_plot(gplot, c(group_2), 3.4, posterior_copy_i, "v_a", group_color[4]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Growth rate (e-foldings / day)") +
+    ylim(0, 2.5) +
+    xlim(0, 20) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/growth_rate_copy_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline rate, Copy, unvacc
+gplot <- ggplot()
+gplot <-
+  group_plot(gplot,
+             c(group_1),
+             3.4,
+             posterior_copy_i,
+             "v_b",
+             group_color[2]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Decline rate (e-foldings / day)") +
+    ylim(0, 8.5) +
+    xlim(0, 15) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) 
+
+print(gplot)
+
+ggsave("Plots/decline_rate_copy_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline rate, copy, vaccinated
+gplot <- ggplot()
+gplot <- group_plot(gplot, c(group_2), 3.4, posterior_copy_i, "v_b", group_color[4]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Decline rate (e-foldings / day)") +
+    ylim(0, 3.5) +
+    xlim(0, 10) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/decline_rate_copy_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Growth rate, pfu, unvacc
+gplot <- ggplot()
+gplot <- group_plot(gplot, c(group_1_pfu), 2.3, posterior_pfu_i, "v_a", group_color[2]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Growth rate (e-foldings / day)") +
+    ylim(0, 2.5) +
+    xlim(0, 20) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) 
+
+print(gplot)
+
+ggsave("Plots/growth_rate_pfu_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Growth rate, pfu, vaccinated
+gplot <- ggplot()
+gplot <- group_plot(gplot, c(group_2_pfu), 2.3, posterior_pfu_i, "v_a", group_color[4]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Growth rate (e-foldings / day)") +
+    ylim(0, 2.5) +
+    xlim(0, 20) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) 
+
+print(gplot)
+
+ggsave("Plots/growth_rate_pfu_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline rate, pfu, unvacc
+gplot <- ggplot()
+gplot <-
+  group_plot(gplot,
+             c(group_1_pfu),
+             2.3,
+             posterior_pfu_i,
+             "v_b",
+             group_color[2]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Decline rate (e-foldings / day)") +
+    ylim(0, 4.0) +
+    xlim(0, 10) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/decline_rate_pfu_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline, pfu, vaccinated
+gplot <- ggplot()
+gplot <- group_plot(gplot, c(group_2_pfu), 2.3, posterior_pfu_i, "v_b", group_color[4]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Decline rate (e-foldings / day)") +
+    ylim(0, 3.5) +
+    xlim(0, 20) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    ) 
+
+print(gplot)
+
+ggsave("Plots/decline_rate_pfu_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+group_plot_peak <- function(gplot, group, post, col, lod) {
+  df_t <- data.frame("x" = double())
+  for (i in group) {
+    # time_meas <- extract_t(post(i), lod)[measure][[1]]
+    peak_meas <- log10(post(i)[["p_ln_v_max"]])+lod/log(10)
+    df_t <- rbind(df_t, data.frame("x" = peak_meas))
+    gplot <-
+      gplot + geom_density(
+        data = data.frame("x" = peak_meas),
+        aes(x = x),
+        fill = col,
+        colour = NA,
+        alpha=0.25
+      )
+  }
+  gplot <-
+    gplot + geom_density(data = data.frame("x" = df_t), aes(x = x), colour = "black")
+  return(gplot)
+}
+```
+
+```{r}
+# Peak, copy, unvaccinated
+gplot <- ggplot()
+gplot <-
+  group_plot_peak(gplot,
+                  c(group_1),
+                  posterior_copy_i,
+                  group_color[2], 3.4) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Peak (log10 copies/ml)") +
+  ylim(0, 2) +
+  xlim(3, 12) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+print(gplot)
+
+ggsave("Plots/peak_copy_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Peak, copy, unvaccinated
+gplot <- ggplot()
+gplot <-
+  group_plot_peak(gplot,
+                  c(group_2),
+                  posterior_copy_i,
+                  group_color[4], 3.4) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Peak (log10 copies/ml)") +
+  ylim(0, 2) +
+  xlim(3, 12) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+print(gplot)
+
+ggsave("Plots/peak_copy_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Peak, pfu, unvaccinated
+gplot <- ggplot()
+gplot <-
+  group_plot_peak(gplot,
+                  c(group_1_pfu, group_2_pfu, group_3_pfu),
+                  posterior_pfu_i,
+                  group_color[2], 2.3) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Peak (log10 copies/ml)") +
+  ylim(0, 2) +
+  xlim(0, 10) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(gplot)
+
+ggsave("Plots/peak_pfu_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Peak, pfu, vaccinated
+gplot <- ggplot()
+gplot <-
+  group_plot_peak(gplot, c(group_2_pfu), posterior_pfu_i, group_color[4], 2.3) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Peak (log10 copies/ml)") +
+  ylim(0, 2) +
+  xlim(0, 10) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank()) 
+
+print(gplot)
+
+ggsave("Plots/peak_pfu_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+
+```
+
+```{r}
+# Growth phase length, Copy, unvacc
+gplot <- ggplot()
+gplot <- group_plot_duration(gplot, c(group_1, group_2, group_3), 3.4, posterior_copy_i, "t_to_peak", group_color[2]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Growth phase duration (days)") +
+    ylim(0, 2.2) +
+    xlim(0, 20) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/growth_duration_copy_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Growth phase length, Copy, vacc
+gplot <- ggplot()
+gplot <- group_plot_duration(gplot, c(group_2), 3.4, posterior_copy_i, "t_to_peak", group_color[4]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Growth phase duration (days)") +
+    ylim(0, 2.2) +
+    xlim(0, 20) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/growth_duration_copy_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline phase length, Copy, vacc
+gplot <- ggplot()
+gplot <- group_plot_duration(gplot, c(group_2), 3.4, posterior_copy_i, "t_from_peak", group_color[4]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Decline phase duration (days)") +
+    ylim(0, 1.75) +
+    xlim(0, 25) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/Decline_duration_copy_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline phase length, Copy, vacc
+gplot <- ggplot()
+gplot <- group_plot_duration(gplot, c(group_1, group_2, group_3), 3.4, posterior_copy_i, "t_from_peak", group_color[2]) +
+  theme_bw() +
+    theme(legend.text = element_text(size = 10)) +
+    ylab("Posterior probability density") +
+    xlab("Decline phase duration (days)") +
+    ylim(0, 1.25) +
+    xlim(0, 35) +
+  theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank()
+    )
+
+print(gplot)
+
+ggsave("Plots/Decline_duration_copy_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline phase length, PFU, unvacc
+gplot <- ggplot()
+gplot <-
+  group_plot_duration(
+    gplot,
+    c(group_1_pfu),
+    2.3,
+    posterior_pfu_i,
+    "t_from_peak",
+    group_color[2]
+  ) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Decline phase duration (days)") +
+  ylim(0, 2.2) +
+  xlim(0, 8) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(gplot)
+
+ggsave("Plots/Decline_duration_pfu_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline phase length, PFU, vacc
+gplot <- ggplot()
+gplot <-
+  group_plot_duration(
+    gplot,
+    c(group_2_pfu),
+    2.3,
+    posterior_pfu_i,
+    "t_from_peak",
+    group_color[4]
+  ) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Decline phase duration (days)") +
+  ylim(0, 2.2) +
+  xlim(0, 8) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(gplot)
+
+ggsave("Plots/Decline_duration_pfu_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# Decline phase length, PFU, vacc
+gplot <- ggplot()
+gplot <-
+  group_plot_duration(
+    gplot,
+    c(group_4_pfu),
+    2.3,
+    posterior_pfu_i,
+    "t_to_peak",
+    group_color[4]
+  ) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Growth phase duration (days)") +
+  ylim(0, 2.2) +
+  xlim(0, 8) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(gplot)
+
+ggsave("Plots/Growth_duration_pfu_vacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
+
+```{r}
+# growth phase length, PFU, unvacc
+gplot <- ggplot()
+gplot <-
+  group_plot_duration(
+    gplot,
+    c(group_1_pfu),
+    2.3,
+    posterior_pfu_i,
+    "t_to_peak",
+    group_color[2]
+  ) +
+  theme_bw() +
+  theme(legend.text = element_text(size = 10)) +
+  ylab("Posterior probability density") +
+  xlab("Growth phase duration (days)") +
+  ylim(0, 2.2) +
+  xlim(0, 8) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+print(gplot)
+
+ggsave("Plots/growth_duration_pfu_unvacc.png", width = 8, height = 7, units = "cm", dpi=500, gplot)
+```
