@@ -1,8 +1,9 @@
-library(readxl, plyr)
 library(dplyr)
 library(rstan)
 
-df_merged <- readRDS(file="/rds/general/user/ljj14/home/incident/IncidentTrajectories_v7.RDS") 
+fp_dist = FALSE
+
+df_merged <- readRDS(file="Data/trajectories.RDS") 
 df_merged <- df_merged %>%
   mutate(group = case_when(
     (vaccinated == FALSE) & (WGS == "Pre-Alpha") ~ 1,
@@ -17,7 +18,12 @@ df_merged$obs_id <- as.integer(factor(df_merged$id_sub, levels=unique(df_merged$
 # Copy number
 options(mc.cores = 8)
 rstan_options(auto_write = TRUE)
-model <- stan_model("VL_model_hier_v3.stan")
+if (fp_dist) {
+  model_file = "model.stan"
+} else {
+  model_file = "model2.stan"
+}
+model <- stan_model(model_file)
 
 x <- df_merged$copy
 x[x==1] <- exp(3.43)
@@ -44,8 +50,6 @@ data.stan<-list(M=M,
                obs_id=obs_id,
                pr_fp=3,         # mean of prior for error proportion
                pr_fp_sd=0.5,      # SD of prior of error proportion
-               pr_fp_v=3,       # prior for mean of error CT distribution
-               pr_fp_v_s=3,  
                hp_v = c(15.0, 1.25, 0.5),
                hp_v_sd = c(15.0, 0.75, 1.4),
                hp_v_sd_sd = c(10.0, 1.0, 1.0),
@@ -56,6 +60,17 @@ data.stan<-list(M=M,
                lod=3.4,
                eta=1
 )
+
+if (fp_dist) {
+  # prior for mean of error CT distribution
+  data.stan = c(
+    data.stan,
+    list(
+      pr_fp_v=3,       
+      pr_fp_v_s=3
+    )
+  )
+}
 
 initf <- function(chain_id) {
  list(
@@ -69,4 +84,9 @@ fit = sampling(model, chains=8, cores=8, data=data.stan,
            iter=8000, init=initf, init_r=0.1, warmup=3000, seed=497101, thin=2,
            control=list(max_treedepth=12, adapt_delta = 0.994, stepsize=0.01))
 
-save(fit, file = "fit.Rdata")
+if (fp_dist) {
+  save(fit, file = "fit.Rdata")
+} else {
+  fit2 = fit
+  save(fit2, file = "fit2.Rdata")
+}
