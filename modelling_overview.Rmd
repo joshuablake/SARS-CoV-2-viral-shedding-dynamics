@@ -1,0 +1,533 @@
+---
+title: 'ATACCC: latest data and model'
+author: "Joshua Blake"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggdist)
+library(ggplot2)
+library(purrr)
+library(rstan)
+library(tidybayes)
+library(tidyr)
+```
+
+# Summary
+
+* Hakki et al. have fitted a viral load trajectory model to data from the ATACCC study by vaccination status. This is based on 57 individuals with a mix of Pre-Alpha, Alpha, and Delta infections.
+* I have reproduced Hakki et al.'s results and repeated their analysis with a simplified model for test failures. The simplified model improves convergence and effective sample size, although there are still issues with one individual.
+* The parameter estimates which are required for deriving duration are nearly identical between these two models.
+* The derived duration estimate for unvaccinated individuals is very close to my previous estimate; the vaccinated individuals have a shorter duration.
+
+# Methods
+
+## Viral load model
+
+The model for viral load is:
+
+$$
+v(\tau) = v_\max \frac{a+b}{be^{-a(\tau-\tau_{max})} + ae^{b(\tau-\tau_{max})}}
+$$
+where all the parameters are individual-specific (the dependence on $i$ is suppressed for clarity).
+$v_{max}$ is the maximum viral load.
+For times for from the peak, there is exponential growth (before the peak) or decline (after the peak) in viral load at rates $a$ and $b$ respectively.
+
+
+```{r example-trajectory, fig.cap="An example trajectory produced by the viral load model using the point estimates of Table S3 in Hakki et al.",cache=TRUE}
+expose_stan_functions("model2.stan")
+vector_logVL = Vectorize(logVL, vectorize.args = "t")
+ggplot(NULL) +
+  stat_function(fun = vector_logVL, args = list(exp(c(15, 1.6, 0.3))), xlim = c(-10, 30)) +
+  coord_cartesian(ylim = c(0, NA)) +
+  labs(
+    x = "Time from peak viral load",
+    y = "Log viral load"
+  )
+```
+
+On the assumption that the exponential growth approximation works well at the initial time of positive and negative, we can derive the time of first and last positive at the two times $\log v(\tau) = 0$.
+Denote these times as $\tau_0$ and $\tau_1$.
+The duration is then $d = \tau_1 - \tau_0$.
+
+$$
+\begin{aligned}
+\tau_0
+&= \tau_{max} - \frac{\log \left( v_{max} \frac{a+b}{b} \right)}{a} \\
+&= \tau_{max} - \frac{\log v_{max} + \log(a+b) - \log b }{a} \\
+\tau_1
+&= \tau_{max} + \frac{\log \left( v_{max} \frac{a+b}{a} \right)}{b} \\
+&= \tau_{max} - \frac{\log v_{max} + \log(a+b) - \log a }{b} \\
+d
+&= \frac{\log v_{max} + \log(a+b) - \log a }{b} - \frac{\log v_{max} + \log(a+b) - \log b }{a} \\
+&= \frac{(a+b) (\log v_{max} + \log(a+b)) - a \log a - b \log b}{ab}
+\end{aligned}
+$$
+
+Following the original paper, and no longer suppressing the subscript for each individual, define for individual $j$. $\theta_j = \left( \log v_{max,j}, \log a_j, \log b_j \right)^T$.
+We then have $\theta_j \sim N(\mu_{k(j)}, \Omega)$ where $\mu_k$ is a parameter estimated for strata $k$ and $\Omega$ is a covaraince matrix parameterised by a correlation matrix $C$ and a vector of standard deviation parameters $\delta$.
+This gives:
+$$
+\begin{aligned}
+d(\theta)
+&= \frac{(e^{\theta_2} + e^{\theta_3}) (\theta_1 + \log(e^{\theta_2} + e^{\theta_3})) - e^{\theta_2} \theta_2 - e^{\theta_3} \theta_3}{e^{\theta_2} e^{\theta_3}} \\
+&= \frac{(e^{\theta_2} + e^{\theta_3}) (\theta_1 + \log(e^{\theta_2} + e^{\theta_3}))}{\exp(\theta_2 + \theta_3)} - e^{-\theta_3} \theta_2 - e^{-\theta_2} \theta_3 \\
+\end{aligned}
+$$
+
+Conditional on $\mu_k$ and $\Omega$ we approximate the cumulative duration distribution for strata $k$, $F_{d \mid \mu_k, \Omega}$ using the following procedure.
+
+1. Draw 1000 samples of $\theta_1, \dots, \theta_n \sim^{iid} N(\mu_k(j), \Omega)$.
+2. Calculate $d_i(\theta_i)$ using the formula above.
+3. Calculate $f_{D \mid \mu_k, \Omega}(t) = \frac{1}{n} \sum_{i=1}^n I(d_i \leq t + 0.5)$ where $I$ is the indicator function.
+
+
+## Observation model
+
+Hakki et al. make the following assumptions: the log-viral load for an individual $i$ at time $t$, $x_{i,t}$, is observed with Gaussian noise, that false positive and false negative results are normally distributed, and that conditional on $v_i(t)$ all observations are independent.
+For viral loads below the limit of detection (ie: $x_{i,t} \leq 0$), we observe $x_{i,t} = 0$ and hence consider this a censored observation.
+This leads to the following likelihood for each observation:
+$$
+L(x_{i,t}) \begin{cases}
+p f_N(x \mid x_0, \sigma_0^2) + (1 - p) f_N(x \mid \log(v_i(t)), \sigma_v^2) &x > 0 \\
+p F_N(0 \mid x_0, \sigma_0^2) + (1 - p) F_N(0 \mid \log(v_i(t)), \sigma_v^2) & x =0
+\end{cases}
+$$
+where: $p$ is the probability of a test failure; $f_N (x \sim \mu, \sigma^2)$ and $F_N (x \sim \mu, \sigma^2)$ are the pdf and cdf of a Gaussian distribution with mean $\mu$ and standard deviation $\sigma$ respectively; $x_0$ and $\sigma_0$ are the mean and standard deviation of the test error distribution respectively; and $\sigma_v$ is the standard deviation of the observation noise.
+The total likelihood is the product of each observation's likelihood.
+
+In an additional model, we consider a test with a fixed probability of false negatives and no false positives.
+This leads to the following likelihood for each observation:
+$$
+L(x_{i,t}) \begin{cases}
+(1 - p) f_N(x \mid \log(v_i(t)), \sigma_v^2) &x > 0 \\
+p + (1 - p) F_N(0 \mid \log(v_i(t)), \sigma_v^2) & x =0
+\end{cases}
+$$
+where all parameters have the same interpretation as before (although $x_0$ and $\sigma_0$ no longer exist) except that all test failures are false negatives.
+
+## Priors and inference procedure
+
+We use the priors as described by Hakki et al. on page 14 of the supplementary material.
+Inference is performed by Stan's NUTS implementation, with 8 chains each of which are run for 8000 iterations (discarding the first 3000) and thinned by keeping half of the iterations.
+
+SOME PRIOR PREDICTIVE PLOTS WOULD BE USEFUL!
+
+# Data
+
+```{r load-data, include=FALSE}
+tbl_data = readRDS(file=here::here("Data/trajectories.RDS")) %>%
+  mutate(group = case_when(
+    (vaccinated == FALSE) & (WGS == "Pre-Alpha") ~ 1,
+    (vaccinated == FALSE) & (WGS == "Alpha") ~ 1,
+    (vaccinated == FALSE) & (WGS == "Delta") ~ 1,
+    (vaccinated == TRUE) & (WGS == "Delta") ~ 2
+  ))  %>%
+  filter(!is.na(group)) %>% 
+  filter(!is.na(copy)) %>% 
+  mutate(
+    i = as.integer(factor(id_sub, levels=unique(id_sub))),
+    y = if_else(
+      copy == 1,
+      0,
+      log(copy) - 3.43
+    )
+  )
+```
+
+There are a total of `r n_distinct(tbl_data$i)` individuals included.
+The status of each is:
+
+```{r}
+tbl_data %>% 
+  distinct(vaccinated, WGS, i) %>% 
+  count(vaccinated, WGS) %>% 
+  pivot_wider(names_from = WGS, values_from = n, values_fill = 0)
+```
+
+For detailed information of the individuals and plots of the measurement, see the original paper.
+
+# Results
+
+Both models produce almost identical parameters for the group-level parameters and hence the duration distribution.
+The model in the paper shows worse convergence than the simplified model, although both models struggle with one individual who has a multi-modal posterior.
+The estimated distribution of survival for unvaccinated individuals is similar to the previous estimate derived from ATACCC; vaccinated individuals have a shorter duration.
+
+
+```{r fits}
+fits = lst(
+  hakki_et_al = readRDS("fit.rds"),
+  simplified = readRDS("fit2.rds"),
+)
+```
+
+## MCMC diagnostics
+
+The Hakki et al. model has convergence issues ($\hat{R} \approx 1.08$ and $\text{ESS} \approx 65$) for the parameters of the test failure distribution; this issue is solved in the simplified model.
+Both model have convergence issues ($\hat{R} > 1.4$ and $\text{ESS} < 20$) for some of the individual-level parameters, although with the simplified model this is only individual 55.
+
+```{r issues,include=FALSE,cache=TRUE}
+tibble_diagnostics = function(sims) {
+  tibble(
+    `Bulk-ESS` = ess_bulk(sims),
+    `Tail-ESS` = ess_tail(sims),
+    Rhat = Rhat(sims),
+    .rows = 1,
+  )
+}
+
+get_par_diagnostic_tibble = function(fit, pars) {
+  t = rstan::extract(fit, pars, permuted = FALSE)
+  apply(t, 3, tibble_diagnostics) %>% 
+    bind_rows() %>% 
+    mutate(Parameter = dimnames(t)$parameters)
+}
+
+check_fit = function(fit) {
+  check_divergences(fit)
+  check_treedepth(fit)
+  check_energy(fit)
+}
+
+get_diagnostic_warnings = function(diagnostics) {
+  min_bulk_ess = min(diagnostics$`Bulk-ESS`, na.rm = TRUE)
+  min_tail_ess = min(diagnostics$`Tail-ESS`, na.rm = TRUE)
+  max_rhat = max(diagnostics$`Rhat`, na.rm = TRUE)
+  
+  lst(
+    min_bulk_ess = min_bulk_ess,
+    min_tail_ess = min_tail_ess,
+    max_rhat = max_rhat,
+  )
+}
+
+fit_diagnostic_summary = function(fit, pars) {
+  check_fit(fit)
+  diagnostics = get_par_diagnostic_tibble(fit, pars)
+  base_output = get_diagnostic_warnings(diagnostics)
+  c(list(diagnostics = diagnostics), base_output)
+}
+
+indiv_paramater_summary = function(fit) {
+  diagnostics = get_par_diagnostic_tibble(fit, c("p_t_max", "n_v"))
+  base_output = get_diagnostic_warnings(diagnostics)
+  c(list(diagnostics = diagnostics), base_output)
+}
+
+hakki_diagnostics = fit_diagnostic_summary(fits$hakki_et_al, c("vgrow", "v_sd", "Lc", "v_s", "l_fp",
+                                                               "fp_ct_mean", "fp_ct_sd"))
+hakki_indiv = indiv_paramater_summary(fits$hakki_et_al)
+simplified_diagnostics = fit_diagnostic_summary(fits$simplified, c("vgrow", "v_sd", "Lc", "v_s", "l_fp"))
+simplified_indiv = indiv_paramater_summary(fits$simplified)
+```
+
+### Hakki et al. model
+
+For the group-level parameters:
+
+* Min Bulk-ESS: `r hakki_diagnostics$min_bulk_ess`
+* Min Tail-ESS: `r hakki_diagnostics$min_tail_ess`
+* Max Rhat: `r hakki_diagnostics$max_rhat`
+
+```{r diag-table-hakki}
+hakki_diagnostics$diagnostics %>% 
+  DT::datatable()
+```
+
+
+For the individual-level parameters:
+
+* Min Bulk-ESS: `r hakki_indiv$min_bulk_ess`
+* Min Tail-ESS: `r hakki_indiv$min_tail_ess`
+* Max Rhat: `r hakki_indiv$max_rhat`
+
+```{r indiv-table-hakki}
+hakki_indiv$diagnostics %>% 
+  DT::datatable()
+```
+
+
+### Simplified model
+
+For the group-level parameters:
+
+* Min Bulk-ESS: `r simplified_diagnostics$min_bulk_ess`
+* Min Tail-ESS: `r simplified_diagnostics$min_tail_ess`
+* Max Rhat: `r simplified_diagnostics$max_rhat`
+
+```{r diag-table-simplified}
+simplified_diagnostics$diagnostics %>% 
+  DT::datatable()
+```
+
+
+For the individual-level parameters:
+
+* Min Bulk-ESS: `r simplified_indiv$min_bulk_ess`
+* Min Tail-ESS: `r simplified_indiv$min_tail_ess`
+* Max Rhat: `r simplified_indiv$max_rhat`
+
+```{r indiv-table-simp}
+simplified_indiv$diagnostics %>% 
+  DT::datatable()
+```
+
+### Individual 55
+
+```{r indiv-55-data,fig.cap="Individual 55's log viral-load over time"}
+tbl_data %>% 
+  filter(i == 5) %>% 
+  ggplot(aes(day, y)) +
+  geom_line() +
+  geom_point(aes(colour = y > 0))
+```
+
+Looking at traceplots (`p_t_max` is the time of peak viral load, `n_v` are the random effects).
+
+```{r indiv-55-traces, fig.cap="Traceplots for individual 55 in the simplified model."}
+pars_55 = c("p_t_max[55]", paste0("n_v[55,", 1:3, "]"))
+traceplot(fits$simplified, pars_55) +
+  scale_color_discrete()
+```
+
+Looks like an issue with multi-modality.
+
+```{r indiv-55-posterior-dens}
+stan_dens(fits$simplified, pars_55, separate_chains = TRUE)
+```
+
+Mean valus by chain for `p_t_max[55]`:
+
+```{r}
+p_t_max_mean = summary(fits$simplified, "p_t_max[55]", use_cache = FALSE)$c_summary[1,1,]
+chains_short_peak_indiv_55 = which(p_t_max_mean < 5)
+chains_long_peak_indiv_55 = which(p_t_max_mean > 5)
+p_t_max_mean
+```
+
+Chains `r paste(chains_short_peak_indiv_55, collapse = ", ")` have a short time to peak and chains `r paste(chains_long_peak_indiv_55, collapse = ", ")` have a long time to peak.
+
+```{r posterior-predict-55,fig.cap="Posterior predictions from individual 55, seperated by which mode the chain is in. False negatives not included in the posterior predictive intervals.",cache=TRUE}
+spread_draws(fits$simplified, pred_vl[m], v_s) %>% 
+  ungroup() %>% 
+  mutate(
+    i = m %/% 42 + 1,
+    day = m %% 42 - 15,
+    yrep = rnorm(n(), pred_vl, v_s),
+  ) %>% 
+  filter(i == 55) %>% 
+  mutate(short_peak = .chain %in% chains_short_peak_indiv_55) %>% 
+  group_by(short_peak, day) %>% 
+  median_qi(yrep) %>% 
+  ggplot() +
+  geom_lineribbon(aes(day, yrep, fill = short_peak, ymin = .lower, ymax = .upper),
+                  alpha = 0.5, size = 0.7) +
+  geom_point(aes(day, y, colour = y > 0), data = filter(tbl_data, i == 55)) +
+  coord_cartesian(c(-1, 20), c(0, 20))
+```
+
+
+## Posterior predictive checks
+
+```{r yrep,fig.cap="Comparing the posterior predicted distribution of observed viral loads with what is seen in the data",cache=TRUE}
+yrep = function(fit, fixed_fp_ct) {
+  if (fixed_fp_ct) {
+    fp_ct_mean = -100
+    fp_ct_sd = 0.0001
+    raw_draws = spread_draws(
+      fit,
+      pred_vl[m],
+      v_s, l_fp,
+      ndraws = 100
+    )
+  } else {
+    raw_draws = spread_draws(
+      fit,
+      pred_vl[m],
+      v_s, l_fp,
+      fp_ct_mean, fp_ct_sd, 
+      ndraws = 100
+    )
+  }
+  raw_draws %>% 
+    mutate(
+      i = m %/% 42 + 1,
+      day = m %% 42 - 15,
+    ) %>% 
+    semi_join(tbl_data, by = c("i", "day")) %>% 
+    mutate(
+      measure_vl = if_else(
+        log(runif(n())) < -l_fp,
+        rnorm(n(), fp_ct_mean, fp_ct_sd),
+        rnorm(n(), pred_vl, v_s),
+      ),
+      measure_vl = pmax(measure_vl, 0),
+    )
+}
+
+tbl_yrep = bind_rows(
+  yrep(fits$hakki_et_al, FALSE) %>%
+    mutate(model = "hakki"),
+  yrep(fits$simplified, TRUE) %>% 
+    mutate(model = "simplified"),
+)
+
+tbl_yrep %>% 
+  ggplot(aes(measure_vl)) +
+  geom_density(aes(colour = "yrep", group = .draw), alpha = 0.001) +
+  geom_density(aes(y, colour = "y"), data = tbl_data, size = 1) +
+  facet_wrap(~model, ncol = 1) +
+  labs(
+    x = "log v(t)",
+    colour = ""
+  )
+```
+
+## Parameter estimates
+
+```{r posterior-densities,fig.cap="Comparing the posterior density of the three elements of theta between the two models",cache=TRUE}
+tbl_draws = bind_rows(
+  spread_draws(fits$hakki_et_al, vgrow[i,k]) %>% 
+    mutate(model = "hakki"),
+  spread_draws(fits$simplified, vgrow[i,k]) %>% 
+    mutate(model = "simplified"),
+)
+  
+
+tbl_draws %>% 
+  mutate(
+    group = case_when(
+      k == 1 ~ "Unvaccinated",
+      k == 2 ~ "Vaccinated",
+    )
+  ) %>% 
+  ggplot(aes(vgrow, colour = model)) +
+  geom_density() +
+  facet_grid(group~i, scales = "free_x") +
+  labs(
+    x = "theta"
+  )
+```
+
+## Duration estimates
+
+```{r duration-plot-unvacc,fig.cap="Estimates of the cumulative density distribution (posterior median, 50% and 95% CrI) for the duration of positivity from unvaccinated from both models. Estimates are almost idential."}
+simulate_individuals = function(fit, n_group = 1, n_group_level = 1000, n_individuals = 1000) {
+  draws = rstan::extract(fit, c("vgrow", "v_sd", "Lc"))
+  tbl_draws = map_dfr(
+    sample.int(dim(draws[[1]])[1], n_group_level),
+    ~{
+      z = rnorm(n_individuals * 3) %>% 
+        matrix(nrow = 3)
+      mu = draws$vgrow[.x, , n_group]
+      C = draws$Lc[.x,,]
+      delta = draws$v_s[.x,]
+      theta = mu + delta * (C %*% z)
+      tibble(
+        .draw = .x,
+        theta1 = theta[1,],
+        theta2 = theta[2,],
+        theta3 = theta[3,],
+      ) %>% 
+        tibble::rowid_to_column("individual")
+    }
+  )
+}
+
+approximate_duration = function(tbl_draws) {
+  tbl_draws %>% 
+    mutate(
+      d = (exp(theta2) + exp(theta3)) * (theta1 + log(exp(theta2) + exp(theta3))) / exp(theta2 + theta3) -
+        exp(-theta3) * theta2 - exp(-theta2) * theta3
+    ) %>% 
+    group_by(.draw, model) %>% 
+    summarise(
+      t = 0:50,
+      F = map_dbl(t, ~mean(d <= .x + 0.5)),
+      .groups = "drop"
+    )
+}
+
+tbl_duration_unvacc = map_dfr(
+  fits,
+  simulate_individuals,
+  n_group = 1,
+  .id = "model"
+) %>% 
+  approximate_duration()
+
+tbl_duration_unvacc %>% 
+  ggplot(aes(t, F)) +
+  stat_lineribbon(aes(fill = model), .width = c(0.5, 0.95), alpha = 0.25)
+```
+
+```{r duration-plot-vacc,fig.cap="Estimates of the cumulative density distribution for the duration of positivity from vaccinated from both models. Estimates are almost idential."}
+tbl_duration_vacc = map_dfr(
+  fits,
+  simulate_individuals,
+  n_group = 2,
+  .id = "model"
+) %>% 
+  approximate_duration()
+
+tbl_duration_vacc %>% 
+  ggplot(aes(t, F)) +
+  stat_lineribbon(aes(fill = model), alpha = 0.25, size = 0.7)
+```
+
+```{r compare-vacc,fig.cap="Comparing vaccinated and unvaccinated duration in the simplified model. Vaccinated individuals have a shorter duration."}
+bind_rows(
+  tbl_duration_vacc %>% 
+    mutate(type = "Vaccinated"),
+  tbl_duration_unvacc %>% 
+    mutate(type = "Unvaccinated"),
+) %>% 
+  filter(model == "simplified") %>% 
+  ggplot(aes(t, F)) +
+  stat_lineribbon(aes(fill = type), alpha = 0.25, size = 0.7)
+```
+
+```{r compare-old,fig.cap="Compare the estimate of the cdf of duration from the new simplified model in an unvaccinated population to the previous ATACCC estimate. They are very similar except the new estimate is more certain."}
+readr::read_csv("../../incidence-from-prevalence/ataccc_sims/2022-02_informative-prior/integration_samples_monte_carlo.csv",
+                show_col_types = FALSE) %>% 
+  select(t = d, F) %>% 
+  mutate(model = "previous") %>% 
+  bind_rows(tbl_duration_unvacc %>% filter(model == "simplified")) %>% 
+  ggplot(aes(t, F)) +
+  stat_lineribbon(aes(fill = model), .width = 0.95, alpha = 0.25, size = 0.7)
+```
+<!--
+
+## Appendix: integral approach to calculating duration
+
+__This section is incomplete but contains some initial notes, I'd recommend ignoring it!__
+
+For convenience, we write $\log v_{max}$ as a function of $d$:
+$$
+\log v_{max}(d) = \frac{abd}{a+b} + a \log a + b\log b - (a+b)\log(a+b)
+$$
+
+Following the original paper, and no longer suppressing the subscript for each individual, define for individual $j$. $\theta_j = \left( \log v_{max,j}, \log a_j, \log b_j \right)^T$.
+We then have $\theta_j \sim N(\mu_k(j), \Omega)$ where $\mu_k$ is a parameter estimated for strata $k$ and $\Omega$ is a covaraince matrix parameterised by a correlation matrix $C$ and a vector of standard deviation parameters $\delta$.
+
+For convenience, we write $\log v_{max}$ as a function of $d$ and then $\theta$:
+$$
+\log v_{max}(d) = \frac{abd}{a+b} + a \log a + b\log b - (a+b)\log(a+b) \\
+\log v_{max}(d,\theta) = \frac{\exp(\theta_1 + \theta_2)d}{\exp(\theta_1)+\exp(\theta_2)} + \exp(\theta_1) \theta_1 + \exp(\theta_2) \theta_2 - (\exp(\theta_1)+\exp(\theta_2))\log(\exp(\theta_1)+\exp(\theta_2))
+$$
+
+Conditional on $\mu$ and $\Omega$, the discrete duration distribution, $f_{\mu,\Omega}(d)$ is:
+$$
+f_{\mu,\Omega}(t)
+= \int p(t - 0.5 \leq d(\theta) \leq t + 0.5) p(\theta \mid \mu, \Omega) d \theta \\
+= \int d(\theta)
+$$
+-->
+```{r scratch,eval=FALSE}
+
+```
