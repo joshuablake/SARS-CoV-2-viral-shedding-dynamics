@@ -1,0 +1,8 @@
+#!/bin/bash
+
+#SBATCH --job-name=reprod_ataccc
+#SBATCH --time=200
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+
+Rscript run_RNA.R
