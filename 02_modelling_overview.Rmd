@@ -84,7 +84,7 @@ Conditional on $\mu_k$ and $\Omega$ we approximate the cumulative duration distr
 
 1. Draw 1000 samples of $\theta_1, \dots, \theta_n \sim^{iid} N(\mu_k(j), \Omega)$.
 2. Calculate $d_i(\theta_i)$ using the formula above.
-3. Calculate $f_{D \mid \mu_k, \Omega}(t) = \frac{1}{n} \sum_{i=1}^n I(d_i \leq t + 0.5)$ where $I$ is the indicator function.
+3. Calculate $F_{D \mid \mu_k, \Omega}(t) \approx \frac{1}{n} \sum_{i=1}^n I(d_i \leq t + 0.5)$ where $I$ is the indicator function.
 
 
 ## Observation model
