@@ -3,7 +3,11 @@
 .RData
 .Ruserdata
 **.rds
+**.Rdata
+**.csv
 **.html
+**.png
+**.pdf
 **_cache/
 **_files/
 slurm-*.out
