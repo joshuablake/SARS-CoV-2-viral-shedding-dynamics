@@ -235,10 +235,22 @@ For the group-level parameters:
 * Max Rhat: `r hakki_diagnostics$max_rhat`
 
 ```{r diag-table-hakki}
+# posterior::summarise_draws(rstan::extract(
+#     fits$hakki_et_al,
+#     c("vgrow", "v_sd", "Lc", "v_s", "l_fp", "fp_ct_mean", "fp_ct_sd"),
+#     permuted = FALSE
+#   )) %>% 
+#   DT::datatable()
 hakki_diagnostics$diagnostics %>% 
   DT::datatable()
 ```
 
+Traceplots for the problematic parameters (low Bulk-ESS) look OK though.
+
+```{r traces-hakki-group}
+traceplot(fits$hakki_et_al, c("l_fp", "fp_ct_mean", "fp_ct_sd", "v_s"),
+          ncol = 2, alpha = 0.5)
+```
 
 For the individual-level parameters:
 
@@ -281,7 +293,7 @@ simplified_indiv$diagnostics %>%
 
 ```{r indiv-55-data,fig.cap="Individual 55's log viral-load over time"}
 tbl_data %>% 
-  filter(i == 5) %>% 
+  filter(i == 55) %>% 
   ggplot(aes(day, y)) +
   geom_line() +
   geom_point(aes(colour = y > 0))
@@ -334,7 +346,7 @@ spread_draws(fits$simplified, pred_vl[m], v_s) %>%
 
 ## Posterior predictive checks
 
-```{r yrep,fig.cap="Comparing the posterior predicted distribution of observed viral loads with what is seen in the data",cache=TRUE}
+```{r yrep-create,cache=TRUE}
 yrep = function(fit, fixed_fp_ct) {
   if (fixed_fp_ct) {
     fp_ct_mean = -100
@@ -343,7 +355,7 @@ yrep = function(fit, fixed_fp_ct) {
       fit,
       pred_vl[m],
       v_s, l_fp,
-      ndraws = 100
+      ndraws = 1000
     )
   } else {
     raw_draws = spread_draws(
@@ -351,7 +363,7 @@ yrep = function(fit, fixed_fp_ct) {
       pred_vl[m],
       v_s, l_fp,
       fp_ct_mean, fp_ct_sd, 
-      ndraws = 100
+      ndraws = 1000
     )
   }
   raw_draws %>% 
@@ -376,7 +388,9 @@ tbl_yrep = bind_rows(
   yrep(fits$simplified, TRUE) %>% 
     mutate(model = "simplified"),
 )
+```
 
+```{r yrep-plot,fig.cap="Comparing the posterior predicted distribution of observed viral loads with what is seen in the data",cache=TRUE}
 tbl_yrep %>% 
   ggplot(aes(measure_vl)) +
   geom_density(aes(colour = "yrep", group = .draw), alpha = 0.001) +
@@ -388,7 +402,48 @@ tbl_yrep %>%
   )
 ```
 
+
+```{r posterior-predict-all,fig.width=20,fig.height=61,cache=TRUE,fig.cap="Median and 95% predictive intervals for test results compared to observations.",eval=FALSE}
+fits %>% 
+  map_dfr(~spread_draws(.x, pred_vl[m], v_s, l_fp, ndraws = 5), .id = "model") %>% 
+  ungroup() %>% 
+  mutate(
+    i = m %/% 42 + 1,
+    day = m %% 42 - 15,
+    test_result = case_when(
+      log(runif(n())) > -l_fp ~ rnorm(n(), pred_vl, v_s) > 0,
+      model == "hakki_et_al" ~ rnorm(n(), fp_ct_mean, fp_ct_sd) <= 0,
+      model == "simplified" ~ FALSE
+    ),
+  ) %>%
+  semi_join(tbl_data, by = c("i", "day")) %>% 
+  group_by(model, .draw) %>% 
+  summarise(n_pos = sum(test_result)) %>% 
+  ggplot() +
+  geom_histogram(n_pos, aes(colour = model)) +
+  # geom_vline(aes(xintercept = ))
+  geom_lineribbon(aes(day, yrep, fill = model, ymin = .lower, ymax = .upper),
+                  alpha = 0.5, size = 0.7) +
+  geom_point(aes(day, y, colour = y > 0))  +
+  coord_cartesian(c(-1, 20), c(0, 20)) +
+  facet_wrap(~i, ncol = 5)
+```
+
+```{r posterior-predict-prop-pos,cache=TRUE,fig.cap="Posterior predicted number of negative tests compared to the observed number (vertical line)."}
+tbl_yrep %>% 
+  ungroup() %>% 
+  group_by(.draw, model) %>% 
+  summarise(n_pos = sum(measure_vl > 0)) %>% 
+  ggplot(aes(n_pos)) + 
+  geom_bar() +
+  facet_wrap(~model) +
+  geom_vline(aes(xintercept = n_pos), data = tbl_data %>% summarise(n_pos = sum(y > 0)))
+```
+
+
 ## Parameter estimates
+
+### Viral load model
 
 ```{r posterior-densities,fig.cap="Comparing the posterior density of the three elements of theta between the two models",cache=TRUE}
 tbl_draws = bind_rows(
@@ -412,6 +467,38 @@ tbl_draws %>%
   labs(
     x = "theta"
   )
+```
+
+## Specificity and sensitivity
+
+### Hakki et al.
+
+In the model of Hakki et al., we can define the constant portion of sensitivity and specificity as the probability mass that is always above and below the limit of detection respectively.
+This probability mass comes from the test failure distribution (a Gaussian with mean $x_0$ and standard deviation $\sigma_0$).
+Then, the sensitivity is $ 1 - p F_N(0 \mid x_0, \sigma_0^2)$ and the specificity is $ 1- (p (1 - F_N(0 \mid x_0, \sigma_0^2)))$.
+
+```{r spec-sens-hakki}
+fp_draws = rstan::extract(fits$hakki_et_al, c("fp", "fp_ct_mean", "fp_ct_sd"), permuted = FALSE)
+specificity = 1 - fp_draws[,,"fp"] * pnorm(0, fp_draws[,,"fp_ct_mean"], fp_draws[,,"fp_ct_sd"])
+sensitivity = 1 - fp_draws[,,"fp"]*+ pnorm(0, fp_draws[,,"fp_ct_mean"], fp_draws[,,"fp_ct_sd"], lower.tail = FALSE)
+
+sens_spec_draws = abind::abind(specificity, sensitivity, along = 3)
+dimnames(sens_spec_draws)[[3]] = c("Specificity", "Sensitivity")
+posterior::summarise_draws(sens_spec_draws)
+```
+
+### Simplified model
+
+In the simplified model, $p$ gives the constant portion of test sensitivity; 100% test specificity is assumed.
+
+```{r spec-sens-simplified}
+fp_draws = rstan::extract(fits$simplified, c("l_fp"), permuted = FALSE)
+sensitivity = 1 - exp(-fp_draws[,,"l_fp"])
+specificity = matrix(1, ncol = ncol(sensitivity), nrow = nrow(sensitivity))
+
+sens_spec_draws = abind::abind(specificity, sensitivity, along = 3)
+dimnames(sens_spec_draws)[[3]] = c("Specificity", "Sensitivity")
+posterior::summarise_draws(sens_spec_draws)
 ```
 
 ## Duration estimates
@@ -496,10 +583,10 @@ bind_rows(
 readr::read_csv("../../incidence-from-prevalence/ataccc_sims/2022-02_informative-prior/integration_samples_monte_carlo.csv",
                 show_col_types = FALSE) %>% 
   select(t = d, F) %>% 
-  mutate(model = "previous") %>% 
-  bind_rows(tbl_duration_unvacc %>% filter(model == "simplified")) %>% 
+  mutate(model = "Previous") %>% 
+  bind_rows(tbl_duration_unvacc %>% filter(model == "simplified") %>% mutate(model = "New")) %>% 
   ggplot(aes(t, F)) +
-  stat_lineribbon(aes(fill = model), .width = 0.95, alpha = 0.25, size = 0.7)
+  stat_lineribbon(aes(fill = model, colour = model), .width = 0.95, alpha = 0.25, size = 0.7)
 ```
 <!--
 
@@ -529,5 +616,17 @@ f_{\mu,\Omega}(t)
 $$
 -->
 ```{r scratch,eval=FALSE}
-
+full_join(
+  tbl_duration_unvacc %>% 
+    select(.draw, t, unvacc = F) %>% 
+    group_by(t) %>% 
+    mean_qi(unvacc, .simple_names = FALSE),
+  tbl_duration_vacc %>% 
+    select(.draw, t, vacc = F) %>% 
+    group_by(t) %>% 
+    mean_qi(vacc, .simple_names = FALSE),
+  by = c("t", ".width", ".point", ".interval")
+) %>% 
+  select(-c(.width, .point, .interval)) %>% 
+  readr::write_csv("for_SARAH.csv")
 ```

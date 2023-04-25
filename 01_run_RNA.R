@@ -1,19 +1,23 @@
 library(dplyr)
 library(rstan)
 
+prior_only = TRUE
+
 fp_dist = FALSE
 
-df_merged <- readRDS(file="Data/trajectories.RDS") 
-df_merged <- df_merged %>%
-  mutate(group = case_when(
-    (vaccinated == FALSE) & (WGS == "Pre-Alpha") ~ 1,
-    (vaccinated == FALSE) & (WGS == "Alpha") ~ 1,
-    (vaccinated == FALSE) & (WGS == "Delta") ~ 1,
-    (vaccinated == TRUE) & (WGS == "Delta") ~ 2
-  ))  %>%
-  filter(!is.na(group)) # Remove participants which don't fit into any group
+if (!prior_only) {
+  df_merged <- readRDS(file="Data/trajectories.RDS") 
+  df_merged <- df_merged %>%
+    mutate(group = case_when(
+      (vaccinated == FALSE) & (WGS == "Pre-Alpha") ~ 1,
+      (vaccinated == FALSE) & (WGS == "Alpha") ~ 1,
+      (vaccinated == FALSE) & (WGS == "Delta") ~ 1,
+      (vaccinated == TRUE) & (WGS == "Delta") ~ 2
+    ))  %>%
+    filter(!is.na(group)) # Remove participants which don't fit into any group
 
-df_merged$obs_id <- as.integer(factor(df_merged$id_sub, levels=unique(df_merged$id_sub)))
+  df_merged$obs_id <- as.integer(factor(df_merged$id_sub, levels=unique(df_merged$id_sub)))
+}
 
 # Copy number
 options(mc.cores = 8)
@@ -25,20 +29,30 @@ if (fp_dist) {
 }
 model <- stan_model(model_file)
 
-x <- df_merged$copy
-x[x==1] <- exp(3.43)
-x <- log(x) - 3.43
-t <- df_merged$day[!is.na(x)]
-obs_id <- df_merged$obs_id[!is.na(x)]
-x <- x[!is.na(x)]
-N <- length(unique(obs_id))
-group_index <- df_merged[!is.na(x),] %>%
-  group_by(obs_id) %>%
-  summarise(group_index= unique(group))
-group_index <- group_index$group_index
-# group_index <- rep(1, N)
-NG <- length(unique(group_index))
-M <- length(x)
+if (prior_only) {
+  N = 0
+  M = 0
+  t = numeric()
+  x = numeric()
+  obs_id = integer()
+  NG = 1
+  group_index = integer()
+} else {
+  x <- df_merged$copy
+  x[x==1] <- exp(3.43)
+  x <- log(x) - 3.43
+  t <- df_merged$day[!is.na(x)]
+  obs_id <- df_merged$obs_id[!is.na(x)]
+  x <- x[!is.na(x)]
+  N <- length(unique(obs_id))
+  group_index <- df_merged[!is.na(x),] %>%
+    group_by(obs_id) %>%
+    summarise(group_index= unique(group))
+  group_index <- group_index$group_index
+  # group_index <- rep(1, N)
+  NG <- length(unique(group_index))
+  M <- length(x)
+}
 
 # Pass data to model
 data.stan<-list(M=M,
@@ -85,8 +99,7 @@ fit = sampling(model, chains=8, cores=8, data=data.stan,
            control=list(max_treedepth=12, adapt_delta = 0.994, stepsize=0.01))
 
 if (fp_dist) {
-  save(fit, file = "fit.Rdata")
+  saveRDS(fit, file = "fit.Rds")
 } else {
-  fit2 = fit
-  save(fit2, file = "fit2.Rdata")
+  saveRDS(fit, file = "fit.Rds")
 }
