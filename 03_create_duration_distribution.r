@@ -3,10 +3,11 @@ library(rstan)
 library(tidyr)
 
 n_param_samples = 1e3
-n_indiv_per_param = 1e6
+n_indiv_per_param = 1e7
 n_group = 1 # Group number to calculate distribution for (see 01_run_RNA.R)
 
 logit = function(x) log(x) - log(1 - x)
+expit = function(x) 1 / (1 + exp(-x))
 
 logsumexp <- function(a, b) {
     max_x <- pmax(a, b)  # find the maximum value in x
@@ -56,11 +57,17 @@ tbl_duration = purrr::map_dfr(
         )
     },
     .progress = TRUE
-) |>
+)
+
+tbl_duration = tbl_duration |>
+    group_by(.draw) |>
+    arrange(t, .by_group = TRUE) |>
     mutate(
         S = c(1, 1 - lag(F)[-1]),
         lambda = if_else(S == 0, 0, f / S),
-    )
+    ) |>
+    ungroup()
+
 
 tbl_duration |>
     group_by(t) |>
@@ -78,7 +85,7 @@ tbl_duration |>
 
 logit_hazard_matrix = tbl_duration |>
     filter(between(t, 0, 40)) |>
-    mutate(lambda = if_else(lambda <= 0, (1e-6)/2, lambda)) |>
+    mutate(lambda = if_else(lambda <= 0, (1e-7)/2, lambda)) |>
     assertr::verify(lambda > 0 & lambda < 1) |>
     pivot_wider(id_cols = .draw, values_from = lambda, names_from = t) |>
     select(!.draw) |>
@@ -93,6 +100,54 @@ stopifnot(all(is.finite(logit_hazard_cov)))
 logit_hazard_mean = logit_hazard_matrix |>
     colMeans()
 
+logit_hazard_matrix2 = tbl_duration |>
+    filter(between(t, 0, 40)) |>
+    mutate(lambda = if_else(lambda <= 0, rbeta(n(), 0.5, 1e7), lambda)) |>
+    assertr::verify(lambda > 0 & lambda < 1) |>
+    pivot_wider(id_cols = .draw, values_from = lambda, names_from = t) |>
+    select(!.draw) |>
+    as.matrix() |>
+    logit()
+stopifnot(all(is.finite(logit_hazard_matrix)))
+
+logit_hazard_matrix2 |>
+    cov() |>
+    diag() |>
+    cbind(diag(logit_hazard_cov))
+stopifnot(all(is.finite(logit_hazard_cov)))
+
+logit_hazard_matrix2 |>
+    colMeans()
+
+# Means from the two methods similar
+# Variance quite a bit higher using beta method which is probability good: otherwise unrealistically low!
+# Only matters for first 3 elements, and we discard one of these
+
+# Check correlations
+logit_hazard_matrix2 |>
+    cor() |>
+    magrittr::extract(1:6, 1:6)
+logit_hazard_cov |>
+    cov2cor() |>
+    magrittr::extract(1:6, 1:6)
+# 0 and 1 quite a bit more correlated on the latter (with each other)
+# Generally little difference though
+
+## What do marginals for day 1 (element 2) look like?
+# Orig: very, very small (all <= 1e-6)
+qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), logit_hazard_mean[2], sqrt(logit_hazard_cov[2,2])) |> expit()
+# Updated, slightly bigger but not much (largest 7e-6)
+qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), mean(logit_hazard_matrix2[,2]), sd(logit_hazard_matrix2[,2])) |> expit()
+
+## What do marginals for day 2 (element 3) look like?
+# Orig: very, very small (all <= 1e-6)
+qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), logit_hazard_mean[3], sqrt(logit_hazard_cov[3,3])) |> expit()
+# Updated, slightly bigger but not much (largest 1e-4)
+qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), mean(logit_hazard_matrix2[,3]), sd(logit_hazard_matrix2[,3])) |> expit()
+
+logit_hazard_mean2 = colMeans(logit_hazard_matrix2)
+logit_hazard_cov2 = cov(logit_hazard_matrix2)
+
 saveRDS(tbl_duration, "duration_samples.rds")
-saveRDS(logit_hazard_mean, "logit_hazard_mean.rds")
-saveRDS(logit_hazard_cov, "logit_hazard_cov.rds")
+saveRDS(logit_hazard_mean2, "logit_hazard_mean.rds")
+saveRDS(logit_hazard_cov2, "logit_hazard_cov.rds")
