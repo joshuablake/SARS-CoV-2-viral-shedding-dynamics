@@ -17,6 +17,9 @@ library(purrr)
 library(rstan)
 library(tidybayes)
 library(tidyr)
+
+logit = function(x) log(x) - log(1 - x)
+expit = function(x) 1 / (1 + exp(-x))
 ```
 
 ```{r load-dists}
@@ -44,48 +47,77 @@ tbl_ataccc = bind_rows(
 
 # Posteriors
 
-```{r lambda-compare}
-tbl_ataccc |>
-    ggplot(aes(lambda, colour = version)) +
-    geom_density() +
-    facet_wrap(~t, scale = "free")
+```{r ggally-visualise,fig.width=150,fig.height=150}
+n_lambdas_to_plot = 30
+
+plot_theme <- theme_bw() + theme(
+  axis.text.x = element_text(size = 20, angle = 45, hjust = 1),
+  axis.text.y = element_text(size = 20),
+  strip.text = element_text(size = 20)
+)
+
+p = tbl_ataccc |>
+    filter(between(t, 1, n_lambdas_to_plot)) |>
+    pivot_wider(id_cols = c(.draw, version), names_from = t, values_from = lambda)  |>
+    select(!.draw) |>
+    ggpairs(
+        columns = 2:(n_lambdas_to_plot+1), # Assuming the first 30 columns are the parameters
+        mapping = aes(color = version),
+        upper = list(continuous = wrap("autopoint")),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.7, size = 1)),
+        lower = list(continuous = wrap("autopoint"))
+    ) +
+    plot_theme
+# print(p)
+ggsave("pairs.png", p, width = 100, units = "cm",
+        height = 100, limitsize = FALSE)
+
+p_logit = tbl_ataccc |>
+    filter(between(t, 1, n_lambdas_to_plot)) |>
+    pivot_wider(id_cols = c(.draw, version), names_from = t, values_from = lambda)  |>
+    select(!.draw) |>
+    mutate(across(!version, logit)) |>
+    ggpairs(
+        columns = 2:(n_lambdas_to_plot+1),
+        mapping = aes(color = version),
+        # upper = list(continuous = "blank"),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.7, size = 1)),
+        lower = list(continuous = "autopoint"),
+        legend = 2
+    ) +
+    plot_theme
+ggsave("pairs_logit.png", p_logit, width = 100, units = "cm",
+        height = 100, limitsize = FALSE)
 ```
 
-```{r lambda-compare-cor}
-# Function from ChatGPT
-custom_pairs_plot_list <- function(data, exclude_columns = character(), ...) {
-  columns <- colnames(data)
-  columns <- columns[!columns %in% exclude_columns]
-  n <- length(columns)
 
-  create_plots <- function(i, j) {
-    if (i == j) {
-      p <- ggplot(data, aes(!!sym(columns[i]), ...)) +
-        geom_density() +
-        theme_minimal() +
-        theme(legend.position = "none")
-    } else {
-      p <- ggplot(data, aes(!!sym(columns[j]), y = !!sym(columns[i]), ...)) +
-        geom_point(alpha = 0.5) +
-        theme_minimal() +
-        theme(legend.position = "none")
-    }
-    return(p)
-  }
+```{r logit-vs-normal}
+logit_normal_mean = readRDS("logit_hazard_mean.rds")
+logit_normal_cov = readRDS("logit_hazard_cov.rds")
+tbl_logit_normal = mvtnorm::rmvnorm(
+    1e3,
+    mean = logit_normal_mean[1:n_lambdas_to_plot],
+    sigma = logit_normal_cov[1:n_lambdas_to_plot,1:n_lambdas_to_plot]
+) |>
+    as_tibble() |>
+    mutate(version = "Normal approx")
 
-  indices <- expand.grid(1:n, 1:n)
-  plots <- mapply(create_plots, indices$Var1, indices$Var2, SIMPLIFY = FALSE)
-  
-  return(plots)
-}
-
-plots = tbl_ataccc |>
-    pivot_wider(id_cols = c(.draw, version), names_from = t, values_from = lambda) |>
-    select(!c(.draw)) |>
-    custom_pairs_plot_list(exclude_columns = "version", colour = version)
-# plotly::subplot(plots)
-plots_interact = plotly::subplot(
-  plots,
-  nrows = 30
-)
+tbl_ataccc_updated = tbl_ataccc |>
+    filter(between(t, 1, n_lambdas_to_plot), version == "Updated") |>
+    pivot_wider(id_cols = c(.draw, version), names_from = t, values_from = lambda)  |>
+    select(!.draw) |>
+    mutate(across(!version, logit))
+    
+p_compare_approx = bind_rows(tbl_ataccc_updated, tbl_logit_normal) |>
+    ggpairs(
+        columns = 2:(n_lambdas_to_plot+1),
+        mapping = aes(color = version),
+        # upper = list(continuous = "blank"),
+        diag = list(continuous = wrap("densityDiag", alpha = 0.7, size = 1)),
+        lower = list(continuous = "autopoint"),
+        legend = 2
+    ) +
+    plot_theme
+ggsave("pairs_approx.png", p_compare_approx, width = 100, units = "cm",
+        height = 100, limitsize = FALSE)
 ```
