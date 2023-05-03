@@ -47,7 +47,7 @@ tbl_ataccc = bind_rows(
 
 # Posteriors
 
-```{r ggally-visualise,fig.width=150,fig.height=150}
+```{r ggally-visualise,fig.width=150,fig.height=150,eval=FALSE}
 n_lambdas_to_plot = 30
 
 plot_theme <- theme_bw() + theme(
@@ -91,7 +91,7 @@ ggsave("pairs_logit.png", p_logit, width = 100, units = "cm",
 ```
 
 
-```{r logit-vs-normal}
+```{r logit-vs-normal,eval=FALSE}
 logit_normal_mean = readRDS("logit_hazard_mean.rds")
 logit_normal_cov = readRDS("logit_hazard_cov.rds")
 tbl_logit_normal = mvtnorm::rmvnorm(
@@ -120,4 +120,230 @@ p_compare_approx = bind_rows(tbl_ataccc_updated, tbl_logit_normal) |>
     plot_theme
 ggsave("pairs_approx.png", p_compare_approx, width = 100, units = "cm",
         height = 100, limitsize = FALSE)
+```
+
+
+# Random walks
+
+```{r rw1}
+logits_to_dist = function(x) {
+    x |>
+        mutate(lambda = expit(value)) |>
+        group_by(.draw) |>
+        arrange(time, .by_group = TRUE) |>
+        mutate(
+            S = c(1, cumprod(1 - lambda)[-n()]),
+            F = c(lead(1 - S)[-(n())], 1),
+            f = diff(c(0, F))
+        ) |>
+        ungroup()
+}
+
+sim_rw1 = function(n_samples = 1000, n_steps = 30, std_dev_rate = 1,
+                    starting_alpha = 0.1, starting_beta = 1.9) {
+    # Number of samples and time steps
+    n_samples = 1000
+    n_steps = 30
+
+    # Generate starting points from Beta distribution
+    starting_points = logit(rbeta(n_samples, 0.1, 1.9))
+
+    # Generate standard deviations from exponential distribution
+    std_deviations = rexp(n_samples, rate = 1)
+
+    # Generate random steps matrix
+    random_steps = matrix(rnorm(n_samples * (n_steps - 1), mean = 0, sd = std_deviations), nrow = n_samples)
+
+    # Compute cumulative sum along rows
+    cumulative_random_steps = t(apply(random_steps, 1, cumsum))
+
+    # Add starting points to the random walks
+    random_walks = sweep(cumulative_random_steps, 2, starting_points, FUN = "+")
+
+    # Add starting points as the first time step
+    random_walks = cbind(starting_points, random_walks)
+
+    # Convert to a data frame for plotting and add other quantities
+    tibble(
+        time = rep(1:n_steps, n_samples),
+        value = as.vector(t(random_walks)),
+        .draw = rep(1:n_samples, each = n_steps)
+    ) |>
+        logits_to_dist()
+}
+```
+
+```{r rw1-default}
+random_walks_df = sim_rw1()
+# Plot the random walks
+ggplot(random_walks_df, aes(x = time, y = value, group = .draw)) +
+  geom_line(alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Time", y = "LogitHazard")
+
+```
+
+```{r surv}
+random_walks_df |>
+    group_by(time) |>
+    median_qi(S) |>
+    ggplot(aes(time, S, ymin = .lower, ymax = .upper)) +
+    geom_lineribbon()
+```
+
+Change the start point to Beta(0.1, 999.9)
+
+```{r rw1-low_start}
+random_walks_low_start_df = sim_rw1(starting_beta = 999.9)
+# Plot the random walks
+ggplot(random_walks_low_start_df, aes(x = time, y = value, group = .draw)) +
+  geom_line(alpha = 0.1) +
+  theme_minimal() +
+  labs(x = "Time", y = "LogitHazard")
+
+```
+
+```{r surv}
+random_walks_low_start_df |>
+    group_by(time) |>
+    median_qi(S) |>
+    ggplot(aes(time, S, ymin = .lower, ymax = .upper)) +
+    geom_lineribbon()
+```
+
+# ATACCC-based
+
+```{r sim-ataccc}
+logit_normal_mean = readRDS("logit_hazard_mean.rds")
+logit_normal_cov = readRDS("logit_hazard_cov.rds")
+
+mvnorm_to_dist = function(draw_matrix) {
+    draw_matrix |>
+        as_tibble() |>
+        tibble::rowid_to_column(".draw") |>
+        pivot_longer(!.draw, names_to = "time", values_to = "value") |>
+        mutate(time = as.integer(time)) |>
+        logits_to_dist()
+}
+
+tbl_logit_normal = mvtnorm::rmvnorm(
+    1e3,
+    mean = logit_normal_mean[1:30],
+    sigma = logit_normal_cov[1:30,1:30]
+) |>
+    mvnorm_to_dist() |>
+    mutate(version = "Correlated")
+
+tbl_logit_normal_uncor = mvtnorm::rmvnorm(
+    1e3,
+    mean = logit_normal_mean[1:30],
+    sigma = diag(diag(logit_normal_cov[1:30,1:30]))
+) |>
+    mvnorm_to_dist() |>
+    mutate(version = "Uncorrelated")
+
+bind_rows(
+    tbl_logit_normal,
+    tbl_logit_normal_uncor
+) |>
+    group_by(time, version) |>
+    median_qi(S) |>
+    ggplot(aes(time, S, ymin = .lower, ymax = .upper, colour = version,
+                fill = version)) +
+    geom_lineribbon(alpha = 0.4)
+```
+
+```{r}
+add_beta_noise = function(x, c_func, alpha0 = 0.1, beta0 = 1.9) {
+    x |>
+        mutate(
+            h = lambda,
+            c = c_func(time),
+            alpha = c * h + alpha0,
+            beta = c * (1 - h) + beta0,
+            lambda = rbeta(n(), alpha, beta),
+        ) |>
+        group_by(.draw) |>
+        arrange(time, .by_group = TRUE) |>
+        mutate(
+            S = c(1, cumprod(1 - lambda)[-n()]),
+            F = c(lead(1 - S)[-(n())], 1),
+            f = diff(c(0, F))
+        ) |>
+        ungroup()
+}
+
+form_c_func = function(c0 = 1e3, rate = 0.4, offset = 20) {
+    function(t) c0 * expit(-rate * (t - offset))
+}
+
+tbl_priors = bind_rows(
+    tbl_ataccc |>
+        filter(version == "Updated") |>
+        mutate(time = t, version = "Posterior"),
+    tbl_logit_normal |>
+        mutate(version = "Normal approx"),
+    tbl_logit_normal |>
+        add_beta_noise(form_c_func()) |>
+        mutate(version = "Central noisy"),
+    tbl_logit_normal |>
+        add_beta_noise(form_c_func(c0 = 10e3, rate = 1)) |>
+        mutate(version = "Less noisy"),
+    tbl_logit_normal |>
+        add_beta_noise(form_c_func(c0 = 50)) |>
+        mutate(version = "More noisy")
+)
+```
+
+```{r plot-S-ATACCC-priors}
+tbl_priors |>
+    group_by(time, version) |>
+    median_qi(S) |>
+    ggplot(aes(time, S, ymin = .lower, ymax = .upper, colour = version,
+                fill = version)) +
+    geom_lineribbon(alpha = 0.4) +
+    facet_wrap(~version)
+```
+
+```{r plot-lambda-ATACCC-priors}
+tbl_priors |>
+    group_by(time, version) |>
+    median_qi(lambda) |>
+    ggplot(aes(time, lambda, ymin = .lower, ymax = .upper, colour = version,
+                fill = version)) +
+    geom_lineribbon(alpha = 0.4) +
+    facet_wrap(~version)
+```
+
+# Vague
+
+```{r vague}
+tbl_vague = expand_grid(
+    .draw = 1:1e3,
+    time = 1:30,
+) |>
+    mutate(lambda = rbeta(n(), 0.1, 1.9),) |>
+    group_by(.draw) |>
+    arrange(time, .by_group = TRUE) |>
+    mutate(
+        S = c(1, cumprod(1 - lambda)[-n()]),
+        F = c(lead(1 - S)[-(n())], 1),
+        f = diff(c(0, F))
+    ) |>
+    ungroup()
+```
+
+```{r plot-lambda-vague}
+tbl_vague |>
+    group_by(time) |>
+    median_qi(lambda) |>
+    ggplot(aes(time, lambda, ymin = .lower, ymax = .upper)) +
+    geom_lineribbon()
+```
+```{r plot-lambda-vague}
+tbl_vague |>
+    group_by(time) |>
+    median_qi(S) |>
+    ggplot(aes(time, S, ymin = .lower, ymax = .upper)) +
+    geom_lineribbon()
 ```
