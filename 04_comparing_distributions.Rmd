@@ -203,7 +203,7 @@ ggplot(random_walks_low_start_df, aes(x = time, y = value, group = .draw)) +
 
 ```
 
-```{r surv}
+```{r surv2}
 random_walks_low_start_df |>
     group_by(time) |>
     median_qi(S) |>
@@ -340,7 +340,7 @@ tbl_vague |>
     ggplot(aes(time, lambda, ymin = .lower, ymax = .upper)) +
     geom_lineribbon()
 ```
-```{r plot-lambda-vague}
+```{r plot-lambda-vague2}
 tbl_vague |>
     group_by(time) |>
     median_qi(S) |>
