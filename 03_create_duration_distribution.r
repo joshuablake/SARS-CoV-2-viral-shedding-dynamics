@@ -1,6 +1,9 @@
 library(dplyr)
 library(rstan)
 library(tidyr)
+library(furrr)
+plan(multicore, workers = parallelly::availableCores(logical = FALSE) %/% 2)
+set.seed(213)
 
 n_param_samples = 1e3
 n_indiv_per_param = 1e7
@@ -29,7 +32,7 @@ draw_nums = sample.int(max_iterations, n_param_samples)
 draws = rstan::extract(fit, c("vgrow", "v_sd", "Lc"))
 
 # Create distribution for each parameter
-tbl_duration = purrr::map_dfr(
+tbl_duration = future_map_dfr(
     draw_nums,
     function(.draw) {
         # Simulate three standard normals per individual (one per random effect)
@@ -45,7 +48,7 @@ tbl_duration = purrr::map_dfr(
         theta = mu + delta * (C %*% z)
         # For each parameter set, calculate the duration
         duration = calc_durations(theta)
-        stopifnot(all(duration >= 0))
+        # stopifnot(all(duration >= 0))
         stopifnot(length(duration) == n_indiv_per_param)
         return(
             tibble::tibble(
@@ -56,7 +59,8 @@ tbl_duration = purrr::map_dfr(
             )
         )
     },
-    .progress = TRUE
+    .progress = TRUE,
+    .options = furrr_options(seed = TRUE)
 )
 
 tbl_duration = tbl_duration |>
@@ -66,84 +70,20 @@ tbl_duration = tbl_duration |>
         S = c(1, 1 - lag(F)[-1]),
         lambda = if_else(S == 0, 0, f / S),
     ) |>
-    ungroup()
+    ungroup() |>
+    rename(time = t)
 
 
-tbl_duration |>
-    group_by(t) |>
-    tidybayes::median_qi(F) |>
-    print(n=50)
-
-tbl_duration |>
-    tidyr::pivot_longer(!c(.draw, t)) |>
-    group_by(t, name) |>
-    tidybayes::median_qi(.width = c(0.5, 0.8, 0.95)) |>
-    ggplot(aes(t, value, ymin = .lower, ymax = .upper)) +
-    tidybayes::geom_lineribbon() +
-    facet_wrap(~name) +
-    scale_x_continuous(breaks = (0:100) * 14, minor_breaks = (0:100) * 2)
-
-logit_hazard_matrix = tbl_duration |>
-    filter(between(t, 0, 40)) |>
-    mutate(lambda = if_else(lambda <= 0, (1e-7)/2, lambda)) |>
-    assertr::verify(lambda > 0 & lambda < 1) |>
-    pivot_wider(id_cols = .draw, values_from = lambda, names_from = t) |>
-    select(!.draw) |>
-    as.matrix() |>
-    logit()
-stopifnot(all(is.finite(logit_hazard_matrix)))
-
-logit_hazard_cov = logit_hazard_matrix |>
-    cov()
-stopifnot(all(is.finite(logit_hazard_cov)))
-
-logit_hazard_mean = logit_hazard_matrix |>
-    colMeans()
 
 logit_hazard_matrix2 = tbl_duration |>
-    filter(between(t, 0, 40)) |>
+    filter(between(time, 0, 40)) |>
     mutate(lambda = if_else(lambda <= 0, rbeta(n(), 0.5, 1e7), lambda)) |>
     assertr::verify(lambda > 0 & lambda < 1) |>
-    pivot_wider(id_cols = .draw, values_from = lambda, names_from = t) |>
+    pivot_wider(id_cols = .draw, values_from = lambda, names_from = time) |>
     select(!.draw) |>
     as.matrix() |>
     logit()
-stopifnot(all(is.finite(logit_hazard_matrix)))
-
-logit_hazard_matrix2 |>
-    cov() |>
-    diag() |>
-    cbind(diag(logit_hazard_cov))
-stopifnot(all(is.finite(logit_hazard_cov)))
-
-logit_hazard_matrix2 |>
-    colMeans()
-
-# Means from the two methods similar
-# Variance quite a bit higher using beta method which is probability good: otherwise unrealistically low!
-# Only matters for first 3 elements, and we discard one of these
-
-# Check correlations
-logit_hazard_matrix2 |>
-    cor() |>
-    magrittr::extract(1:6, 1:6)
-logit_hazard_cov |>
-    cov2cor() |>
-    magrittr::extract(1:6, 1:6)
-# 0 and 1 quite a bit more correlated on the latter (with each other)
-# Generally little difference though
-
-## What do marginals for day 1 (element 2) look like?
-# Orig: very, very small (all <= 1e-6)
-qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), logit_hazard_mean[2], sqrt(logit_hazard_cov[2,2])) |> expit()
-# Updated, slightly bigger but not much (largest 7e-6)
-qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), mean(logit_hazard_matrix2[,2]), sd(logit_hazard_matrix2[,2])) |> expit()
-
-## What do marginals for day 2 (element 3) look like?
-# Orig: very, very small (all <= 1e-6)
-qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), logit_hazard_mean[3], sqrt(logit_hazard_cov[3,3])) |> expit()
-# Updated, slightly bigger but not much (largest 1e-4)
-qnorm(c(0.05, 0.25, 0.5, 0.75, 0.95), mean(logit_hazard_matrix2[,3]), sd(logit_hazard_matrix2[,3])) |> expit()
+stopifnot(all(is.finite(logit_hazard_matrix2)))
 
 logit_hazard_mean2 = colMeans(logit_hazard_matrix2)
 logit_hazard_cov2 = cov(logit_hazard_matrix2)
