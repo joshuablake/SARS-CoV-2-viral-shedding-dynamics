@@ -7,7 +7,7 @@ set.seed(213)
 
 n_param_samples = 1e3
 n_indiv_per_param = 1e7
-n_group = 1 # Group number to calculate distribution for (see 01_run_RNA.R)
+n_group = 2 # Group number to calculate distribution for (see 01_run_RNA.R)
 
 logit = function(x) log(x) - log(1 - x)
 expit = function(x) 1 / (1 + exp(-x))
@@ -88,6 +88,6 @@ stopifnot(all(is.finite(logit_hazard_matrix2)))
 logit_hazard_mean2 = colMeans(logit_hazard_matrix2)
 logit_hazard_cov2 = cov(logit_hazard_matrix2)
 
-saveRDS(tbl_duration, "duration_samples.rds")
-saveRDS(logit_hazard_mean2, "logit_hazard_mean.rds")
-saveRDS(logit_hazard_cov2, "logit_hazard_cov.rds")
+saveRDS(tbl_duration, "duration_samples2.rds")
+saveRDS(logit_hazard_mean2, "logit_hazard_mean2.rds")
+saveRDS(logit_hazard_cov2, "logit_hazard_cov2.rds")

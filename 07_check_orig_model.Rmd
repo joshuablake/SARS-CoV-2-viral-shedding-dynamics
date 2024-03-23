@@ -1,0 +1,39 @@
+---
+title: 'ATACCC: latest data and model'
+author: "Joshua Blake"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+---
+
+```{r,message=FALSE}
+library(dplyr)
+library(rstan)
+library(tidyr)
+source("original_analysis/stan_utils.R")
+fit = readRDS("fit_orig.Rds")
+fit_summary = summary(fit)$summary |>
+    as_tibble(rownames = "param") |>
+    separate(param, c("param_name", "param_index"), "(.+)\\[([0-9]+)\\]", fill = "right")
+fit_summary |>
+    filter(is.na(param_index)) |>
+    select(!param_index) |>
+    knitr::kable()
+```
+
+Check the traceplots.
+
+```{r}
+traceplot(
+    fit,
+    pars = c(
+        "logt_peak_sd"
+    )
+)
+```
+
+```{r}
+check_all_diagnostics(fit)
+```

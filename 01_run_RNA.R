@@ -1,7 +1,7 @@
 library(dplyr)
 library(rstan)
 
-prior_only = TRUE
+prior_only = FALSE
 
 fp_dist = FALSE
 
